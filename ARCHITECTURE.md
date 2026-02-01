@@ -1,583 +1,213 @@
 # Architecture Documentation
 
-## System Overview
+## How the System Works
 
-This application implements a real-time collaborative drawing system using WebSocket connections to synchronize canvas state across multiple users. The architecture is designed with a room-based isolation system to support future scalability.
+This document explains how I built the collaborative drawing app. I'll try to explain the flow of data and the decisions I made while building this.
 
-## Data Flow Diagram
+## Basic Flow
+
+When you open the app, here's what happens:
 
 ```
-User A Browser                Server                 User B Browser
-     |                          |                          |
-     |--[1] Connect------------>|                          |
-     |<--[2] Join Room----------|                          |
-     |<--[3] Init + History-----|                          |
-     |                          |<--[1] Connect------------|
-     |                          |---[2] Join Room--------->|
-     |                          |---[3] Init + History---->|
-     |                          |                          |
-     |--[4] Drawing Event------>|                          |
-     |                          |---[5] Broadcast--------->|
-     |                          |                          |--[6] Render
-     |                          |<--[7] Drawing Event------|
-     |<--[8] Broadcast----------|                          |
-[9] Render                      |                          |
-     |                          |                          |
-     |--[10] Cursor Move------->|                          |
-     |                          |---[11] Broadcast-------->|
+User Opens Browser --> Connects to Server --> Gets Drawing History --> Can Start Drawing
+                                    |
+                            Other Users See It Live
 ```
 
-### Flow Steps:
+The main idea is simple - when one person draws something, it should show up on everyone else's screen immediately.
 
-1. User connects to server via WebSocket
-2. Server assigns user to default room
-3. Server sends initial canvas state and user list
-4. User starts drawing, emits drawing events
-5. Server broadcasts to all other users in the same room
-6. Other users render the drawing in real-time
-7. Process repeats for all users simultaneously
-8. Server broadcasts to requesting user's room
-9. Canvas updates locally
-10. Cursor position updates sent to server
-11. Cursor positions broadcast to room members
+## Data Flow
 
-## Component Architecture
+### When User Joins:
+1. Browser connects to server using websocket
+2. Server gives them a unique ID and color
+3. Server sends all the previous drawings (history)
+4. User can see what others already drew
 
-### Client-Side Components
+### When Someone Draws:
+1. User moves mouse on canvas
+2. Canvas catches the coordinates (x, y positions)
+3. Sends these points to server
+4. Server broadcasts to everyone else
+5. Other users draw the same line on their canvas
 
-#### CanvasManager (canvas.js)
-Responsibilities:
-- Canvas initialization and setup
-- Drawing line segments with smooth paths
-- Handling mouse/touch events
-- Coordinate scaling and normalization
-- Local and remote rendering
-- Canvas clearing and redrawing from history
+### When Someone Leaves:
+- Server removes them from users list
+- Their cursor dissapears from other screens
+- But their drawings stay on the canvas
 
-Key Methods:
-- `getCanvasCoordinates()`: Converts screen coordinates to canvas coordinates
-- `drawLine()`: Renders line segments on canvas
-- `redrawFromHistory()`: Reconstructs canvas from stroke history
+## File Structure & What Each Does
 
-#### WebSocketManager (websocket.js)
-Responsibilities:
-- Socket.io connection management
-- Event emission and listening
-- Stroke history management
-- User list updates
-- Cursor position tracking
+### Client Side (Browser)
 
-Key Methods:
-- `connect()`: Establishes WebSocket connection
-- `updateUsersList()`: Updates online users display
-- `emitDrawEnd()`: Finalizes stroke and updates history
+**canvas.js** - This handles all the drawing stuff
+- Setting up the canvas
+- Drawing lines when user moves mouse
+- Converting mouse position to canvas coordinates (this was tricky because of different screen sizes)
+- Eraser tool using `globalCompositeOperation`
 
-#### CursorManager (canvas.js)
-Responsibilities:
-- Remote cursor visualization
-- Cursor position updates
-- Cursor lifecycle management
+**websocket.js** - Handles connection to server
+- Connects using socket.io
+- Sends drawing data to server
+- Receives drawings from other users
+- Updates user list
 
-Key Methods:
-- `updateCursor()`: Updates cursor position and appearance
-- `removeCursor()`: Cleans up disconnected user cursors
+**main.js** - Just sets up the UI buttons and connects everything
 
-### Server-Side Components
+### Server Side (Node.js)
 
-#### Server (server.js)
-Responsibilities:
-- Express server initialization
-- Socket.io connection handling
-- Event broadcasting
-- User management
-- Color assignment
+**server.js** - Main server file
+- Uses Express for serving files
+- Socket.io for real-time connections
+- Manages all connected users
+- Broadcasts drawing events
 
-Key Features:
-- Handles all WebSocket events
-- Broadcasts to specific rooms
-- Manages user lifecycle
-- Integrates RoomManager and DrawingState
+**drawing-state.js** - Keeps track of all drawings
+- Stores history of all strokes
+- Handles undo/redo
+- This was the hardest part!
 
-#### RoomManager (rooms.js)
-Responsibilities:
-- Room creation and deletion
-- User room assignment
-- Room-based user tracking
-- Drawing state association per room
+**rooms.js** - Room management
+- Right now everyone joins "default" room
+- Made this so we can add multiple rooms later
+- Helps organize users
 
-Key Methods:
-- `joinRoom()`: Adds user to specified room
-- `leaveRoom()`: Removes user from room
-- `getRoomUsers()`: Returns all users in a room
-- `setDrawingState()`: Associates drawing state with room
-- `getDrawingState()`: Retrieves room's drawing state
+## WebSocket Messages
 
-Architecture Benefits:
-- Isolation between different drawing sessions
-- Foundation for multi-room functionality
-- Clean separation of concerns
-- Scalable design for future enhancements
+I use these events to communicate:
 
-#### DrawingState (drawing-state.js)
-Responsibilities:
-- Stroke history management
-- Undo/redo stack handling
-- Current stroke tracking
-- State queries
+### Client sends to Server:
+- `drawing` - when user is drawing (sends x, y, color, width)
+- `draw_end` - when user stops drawing
+- `cursor_move` - cursor position
+- `undo` - undo request
+- `redo` - redo request
+- `clear_canvas` - clear everything
 
-Key Methods:
-- `addDrawingPoint()`: Adds point to current stroke
-- `endStroke()`: Finalizes stroke and adds to history
-- `undo()`: Removes last stroke from history
-- `redo()`: Restores previously undone stroke
-- `getHistory()`: Returns complete stroke history
+### Server sends to Clients:
+- `init` - initial data when joining
+- `drawing` - broadcast someone's drawing
+- `user_joined` - new user notification
+- `user_left` - user disconnect notification
+- `undo/redo` - updated history
 
-## WebSocket Protocol
+## The Undo/Redo Problem
 
-### Client to Server Events
+This was the hardest part. The requirement said undo should work globally - meaning anyone can undo anyone's drawing.
 
-#### `drawing`
-Sent continuously while user is drawing
+### My Solution:
+
+The server keeps an array of all strokes in order. Each stroke looks like:
 ```javascript
 {
-    startX: number,
-    startY: number,
-    endX: number,
-    endY: number,
-    color: string,
-    width: number,
-    tool: 'brush' | 'eraser'
+    userId: 'abc123',
+    color: '#FF0000',
+    width: 3,
+    tool: 'brush',
+    points: [{x: 10, y: 20}, {x: 11, y: 21}, ...]
 }
 ```
 
-#### `draw_end`
-Sent when user completes a stroke
-```javascript
-{}
-```
+When someone clicks undo:
+1. Server removes last stroke from history array
+2. Saves it in "undone" array
+3. Sends entire new history to all users
+4. Everyone redraws their canvas from scratch
 
-#### `cursor_move`
-Sent when user moves cursor on canvas
-```javascript
-{
-    x: number,
-    y: number
-}
-```
+I know redrawing entire canvas is not most efficient but it guarantees everyone sees same thing. With more time I would optimize this.
 
-#### `undo`
-Request to undo last stroke
-```javascript
-{}
-```
-
-#### `redo`
-Request to redo previously undone stroke
-```javascript
-{}
-```
-
-#### `clear_canvas`
-Request to clear entire canvas
-```javascript
-{}
-```
-
-### Server to Client Events
-
-#### `init`
-Sent when user first connects
-```javascript
-{
-    userId: string,
-    history: Array<Stroke>,
-    users: Array<User>
-}
-```
-
-#### `drawing`
-Broadcast drawing event from another user
-```javascript
-{
-    startX: number,
-    startY: number,
-    endX: number,
-    endY: number,
-    color: string,
-    width: number,
-    tool: string,
-    userId: string
-}
-```
-
-#### `draw_end`
-Broadcast when remote user finishes stroke
-```javascript
-{
-    userId: string
-}
-```
-
-#### `cursor_move`
-Broadcast cursor position from another user
-```javascript
-{
-    userId: string,
-    x: number,
-    y: number,
-    color: string,
-    name: string
-}
-```
-
-#### `user_joined`
-Broadcast when new user connects
-```javascript
-{
-    users: Array<User>
-}
-```
-
-#### `user_left`
-Broadcast when user disconnects
-```javascript
-{
-    userId: string,
-    users: Array<User>
-}
-```
-
-#### `undo`
-Broadcast after undo operation
-```javascript
-{
-    history: Array<Stroke>
-}
-```
-
-#### `redo`
-Broadcast after redo operation
-```javascript
-{
-    history: Array<Stroke>
-}
-```
-
-#### `clear_canvas`
-Broadcast when canvas is cleared
-```javascript
-{}
-```
-
-## Undo/Redo Strategy
-
-### Problem
-Global undo/redo means any user can undo any other user's drawing, which requires maintaining a shared history across all clients.
-
-### Solution
-
-1. **Server-Side History Stack**: The server maintains a single source of truth as an array of strokes in chronological order.
-
-2. **Stroke Tracking**: Each drawing action is broken into strokes. A stroke is a complete drawing action from mousedown to mouseup.
-
-3. **Undo Operation**:
-   - Server removes the last stroke from history array
-   - Moves it to an undone history array
-   - Broadcasts updated history to all clients in the room
-   - All clients redraw canvas from scratch using new history
-
-4. **Redo Operation**:
-   - Server takes last item from undone history
-   - Pushes it back to main history
-   - Broadcasts to all clients in the room
-   - Clients redraw from updated history
-
-5. **History Invalidation**: Any new drawing action clears the undone history to prevent inconsistent states.
-
-### Data Structure
-```javascript
-{
-    history: [
-        {
-            userId: 'socket-id-1',
-            color: '#FF0000',
-            width: 3,
-            tool: 'brush',
-            points: [
-                { x: 100, y: 100 },
-                { x: 101, y: 102 },
-                { x: 103, y: 105 }
-            ]
-        }
-    ],
-    undoneHistory: [],
-    currentStrokes: Map {
-        'socket-id-2' => { userId, color, width, tool, points: [...] }
-    }
-}
-```
-
-### Why This Approach?
-
-**Advantages**:
-- Guaranteed consistency across all clients
-- Simple to understand and debug
-- No race conditions with undo/redo
-- Works reliably with any number of users
-
-**Trade-offs**:
-- Full canvas redraw on undo/redo (higher CPU usage)
-- Not optimal for very large canvases
-- But ensures correctness over performance
-
-## Room Management System
-
-### Architecture
-
-The room system provides logical isolation between different drawing sessions:
-
-```javascript
-RoomManager {
-    rooms: Map {
-        'default' => {
-            id: 'default',
-            users: Set ['user1', 'user2'],
-            drawingState: DrawingState
-        },
-        'room-abc123' => {
-            id: 'room-abc123',
-            users: Set ['user3'],
-            drawingState: DrawingState
-        }
-    }
-}
-```
-
-### Current Implementation
-
-- All users join a single "default" room
-- Each room has its own DrawingState instance
-- Room cleanup happens when last user leaves (except default room)
-- Foundation for future multi-room expansion
-
-### Future Multi-Room Support
-
-The architecture supports adding:
-- Unique room URLs (e.g., `/room/abc123`)
-- Room creation API
-- Private/public room options
-- Room capacity limits
-- Room-specific settings
+When someone draws new stroke, the undone array gets cleared. Otherwise redo wouldn't make sense.
 
 ## Performance Decisions
 
-### 1. Event Batching
-**Decision**: Send individual drawing events without batching
+### Why I send individual points instead of batching?
+- Tried batching first but it felt laggy
+- Individual points give smoother real-time feel
+- Network can handle it for small number of users
 
-**Reasoning**: 
-- Simpler implementation for first version
-- Acceptable latency for small number of users
-- Easier to debug and maintain
-- Real-time feel is more important than bandwidth
+### Why full canvas redraw on undo?
+- Simpler to implement
+- Guarantees consistency
+- For assignment demo size, performance is fine
+- In production would need better approach
 
-**Trade-off**: Higher network traffic but better code clarity
+### Coordinate Scaling
+Had to handle different screen sizes. If user A has 1920x1080 and user B has 1366x768, same drawing should look same.
 
-### 2. Canvas Redrawing Strategy
-**Decision**: Full canvas redraw on undo/redo
+Solution: I normalize coordinates based on canvas size, not screen size.
 
-**Reasoning**:
-- Ensures consistency across all clients
-- Simpler state management
-- Avoids complex layer management
-- Correctness over performance
+```javascript
+const scaleX = canvas.width / rect.width;
+const scaleY = canvas.height / rect.height;
+```
 
-**Trade-off**: Higher CPU usage but guaranteed correctness
+This took me some time to figure out!
 
-### 3. Coordinate Scaling
-**Decision**: Send normalized canvas coordinates, not screen coordinates
+## Handling Multiple Users Drawing Together
 
-**Reasoning**:
-- Different users may have different screen sizes
-- Canvas dimensions may vary
-- Ensures drawings appear correctly for all users
-- Resolution-independent drawing
+### What if two people draw at same spot?
+I use "last-write-wins" approach. Whatever reaches server last, that's what shows up on top. The canvas composite operations handle the overlapping naturally.
 
-### 4. Stroke Segmentation
-**Decision**: Break drawings into small line segments
+### Cursor tracking
+Each user has colored cursor so you can see where others are drawing. Helps avoid drawing over each other by mistake.
 
-**Reasoning**:
-- Smoother rendering on remote clients
-- Better real-time visualization
-- Handles network latency gracefully
-- Progressive rendering
+## Room System
 
-### 5. In-Memory State
-**Decision**: Store all state in server memory
+I added rooms.js even though right now everyone is in same room. The architecture supports multiple rooms:
+- Each room has its own drawing state
+- Users in room A can't see room B's drawings
+- Room gets deleted when last person leaves (except default room)
 
-**Reasoning**:
-- Fastest access for real-time operations
-- Simple implementation
-- No database complexity
-- Suitable for MVP/demo
+Didn't implement the UI for multiple rooms due to time, but the backend structure is ready.
 
-**Trade-off**: State lost on server restart, not production-ready
+## Problems I Faced
 
-## Conflict Resolution
+1. **Coordinate mapping** - Took time to understand difference between screen coordinates and canvas coordinates
+2. **Smooth lines** - First version had jagged lines. Fixed by using `lineCap: 'round'` and `lineJoin: 'round'`
+3. **Global undo** - Had to think hard about this. Tried few approaches before settling on full history redraw
+4. **WebSocket events** - Sometimes events arrive out of order. Had to handle that properly
+5. **Eraser tool** - Learned about `globalCompositeOperation = 'destination-out'` for eraser
 
-### Simultaneous Drawing
-**Problem**: Multiple users drawing at the same time in overlapping areas
+## What Could Be Better
 
-**Solution**: Last-write-wins approach
-- All strokes are timestamped by order received at server
-- No explicit locking mechanism
-- Visual feedback through user cursors helps avoid conflicts
-- Canvas composite operations handle overlapping naturally
+With more time I would improve:
+- Add Redis for storing state (right now it's in memory, resets on restart)
+- Optimize the redraw mechanism for undo/redo
+- Add throttling to reduce network traffic
+- Better error handling
+- Add user authentication
+- Make it work better on mobile/touch devices
+- Add more tools like shapes, text etc
 
-### Race Conditions
-**Problem**: Undo/redo requests arriving while drawing is in progress
+## Testing Approach
 
-**Solution**:
-- Complete current strokes before processing undo/redo
-- Server processes events sequentially
-- History updates are atomic operations
-- Drawing events and history operations are separate queues
+I tested by opening multiple browser windows and tabs:
+- Drawing in one, checking if appears in others
+- Testing undo/redo extensively
+- Testing what happens when someone disconnects
+- Checking cursor movements
+- Testing with 3-4 windows open simultaneously
 
-### Network Latency
-**Problem**: Delay between user action and remote rendering
+Found and fixed several bugs during testing like cursor not updating properly, undo not working sometimes etc.
 
-**Solution**:
-- Immediate local rendering (optimistic UI)
-- No waiting for server confirmation
-- Cursor tracking provides awareness of other users
-- Smooth line interpolation compensates for packet loss
-- High-frequency events maintain smooth appearance
+## Security Note
 
-### Concurrent Undo Operations
-**Problem**: Multiple users pressing undo simultaneously
+This is a demo/assignment version so there's no authentication or security. In real production app would need:
+- User login
+- Rate limiting on events
+- Input validation
+- Proper error handling
+- HTTPS/WSS
 
-**Solution**:
-- Server processes undo requests in order received
-- Each undo removes exactly one stroke
-- History state is broadcast after each operation
-- Clients always sync to server's state
+## Conclusion
 
-## State Synchronization
+Overall the assignment helped me learn alot about:
+- Real-time systems
+- WebSocket programming
+- Canvas API
+- State management across multiple clients
+- Handling race conditions
 
-### New User Joining
-1. User connects to WebSocket server
-2. Server assigns user to default room
-3. Server retrieves room's drawing state
-4. Server sends complete history array to user
-5. Client redraws entire canvas from history
-6. User sees current state immediately
-7. Other users notified of new user
+The hardest part was definately the global undo/redo. Spent most time on that. Rest of the features were more straightforward.
 
-### User Disconnecting
-1. User closes browser or loses connection
-2. Server detects disconnection
-3. Server removes user from room
-4. Server broadcasts updated user list
-5. User's strokes remain in history
-6. User's cursor removed from other clients
-7. Room cleanup if last user (except default)
-
-### Drawing Synchronization
-1. User draws line segment locally
-2. Segment rendered immediately (optimistic UI)
-3. Segment data sent to server
-4. Server broadcasts to room members
-5. Remote clients render segment
-6. On stroke end, server adds to history
-7. New users get complete history
-
-## Scalability Considerations
-
-### Current Limitations
-- Single server instance
-- In-memory state storage
-- No horizontal scaling
-- Limited to ~50 concurrent users per room
-- State lost on restart
-
-### Potential Improvements
-
-#### For Production Deployment:
-1. **State Persistence**
-   - Redis for distributed state
-   - PostgreSQL for drawing history
-   - S3 for canvas snapshots
-
-2. **Horizontal Scaling**
-   - WebSocket clustering with sticky sessions
-   - Room-based sharding
-   - Load balancer with Socket.io support
-
-3. **Performance Optimization**
-   - Event batching and throttling
-   - Canvas state compression
-   - Incremental updates instead of full redraws
-   - Web Workers for heavy operations
-
-4. **Resource Limits**
-   - Maximum strokes per canvas
-   - Canvas size restrictions
-   - Rate limiting per user
-   - Room capacity limits
-
-## Security Considerations
-
-### Current Implementation
-- No authentication
-- No authorization
-- Public access to all canvases
-- No input validation
-- No rate limiting
-
-### Production Requirements
-
-1. **Authentication & Authorization**
-   - User authentication system
-   - Room access control
-   - Permission-based actions
-
-2. **Input Validation**
-   - Coordinate range validation
-   - Color format validation
-   - Stroke width limits
-   - Event rate limiting
-
-3. **XSS Prevention**
-   - Sanitize user names
-   - Escape displayed content
-   - Content Security Policy
-
-4. **DoS Prevention**
-   - Rate limiting on drawing events
-   - Maximum canvas size
-   - Maximum stroke count
-   - Connection limits per IP
-
-5. **Data Privacy**
-   - HTTPS/WSS in production
-   - Room isolation enforcement
-   - No cross-room data leakage
-
-## Testing Strategy
-
-### Unit Tests (Recommended)
-- DrawingState operations
-- RoomManager logic
-- Coordinate conversion functions
-
-### Integration Tests (Recommended)
-- WebSocket event flow
-- Multi-user drawing scenarios
-- Undo/redo across users
-
-### Manual Testing
-- Open multiple browser windows
-- Test all drawing tools
-- Verify cursor synchronization
-- Test undo/redo extensively
-- Monitor browser console for errors
-- Check network tab for WebSocket traffic
+Total time spent: Around 8-10 hours including debugging and testing.
