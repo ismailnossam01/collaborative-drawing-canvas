@@ -2,6 +2,8 @@
 
 A multi-user drawing application built with Node.js and Socket.io where multiple people can draw simultaneously on a shared canvas.
 
+🔗 **Live Demo:** https://collaborative-drawing-canvas-production.up.railway.app/
+
 ## Features
 
 - Real-time collaborative drawing
